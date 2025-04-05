@@ -432,3 +432,89 @@
     )
   )
 )
+
+;; Register cryptographic validation
+(define-public (register-cryptographic-validation (channel-identifier uint) (cryptographic-proof (buff 65)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+      )
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (print {operation: "validation_registered", channel-identifier: channel-identifier, validator: tx-sender, cryptographic-proof: cryptographic-proof})
+      (ok true)
+    )
+  )
+)
+
+;; Register alternate entity
+(define-public (register-alternate-entity (channel-identifier uint) (alternate-entity principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+      )
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq alternate-entity tx-sender)) (err u111)) ;; Alternate entity must be different
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {operation: "alternate_registered", channel-identifier: channel-identifier, origin: origin, alternate: alternate-entity})
+      (ok true)
+    )
+  )
+)
+
+;; Adjudicate controversy
+(define-public (adjudicate-controversy (channel-identifier uint) (origin-proportion uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+    (asserts! (<= origin-proportion u100) ERROR_INVALID_QUANTITY) ;; Percentage must be 0-100
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+        (origin-quantity (/ (* quantity origin-proportion) u100))
+        (destination-quantity (- quantity origin-quantity))
+      )
+      (asserts! (is-eq (get channel-status channel-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get terminus-block channel-data)) ERROR_CHANNEL_OUTDATED)
+
+      ;; Send origin's portion
+      (unwrap! (as-contract (stx-transfer? origin-quantity tx-sender origin)) ERROR_TRANSFER_UNSUCCESSFUL)
+
+      ;; Send destination's portion
+      (unwrap! (as-contract (stx-transfer? destination-quantity tx-sender destination)) ERROR_TRANSFER_UNSUCCESSFUL)
+      (print {operation: "controversy_adjudicated", channel-identifier: channel-identifier, origin: origin, destination: destination, 
+              origin-quantity: origin-quantity, destination-quantity: destination-quantity, origin-proportion: origin-proportion})
+      (ok true)
+    )
+  )
+)
+
+;; Register supplementary authorization
+(define-public (register-supplementary-authorization (channel-identifier uint) (authorizer principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for high-value channels (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {operation: "authorization_registered", channel-identifier: channel-identifier, authorizer: authorizer, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
