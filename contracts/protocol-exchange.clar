@@ -342,3 +342,179 @@
     )
   )
 )
+
+;; Validate channel signature
+(define-public (validate-channel-signature (channel-identifier uint) (message (buff 32)) (signature (buff 65)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (status (get channel-status channel-data))
+        (public-key (unwrap! (secp256k1-recover? message signature) (err u240)))
+        (signer-principal (unwrap! (principal-of? public-key) (err u241)))
+      )
+      ;; Can only validate pending or accepted channels
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Must be origin, destination, or supervisor
+      (asserts! (or (is-eq tx-sender origin) 
+                   (is-eq tx-sender (get destination-entity channel-data)) 
+                   (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Check signature validity
+      (asserts! (or (is-eq signer-principal origin) 
+                   (is-eq signer-principal (get destination-entity channel-data))) (err u242))
+
+      (print {operation: "signature_validated", channel-identifier: channel-identifier, 
+              message-digest: (hash160 message), signer: signer-principal, validator: tx-sender})
+      (ok signer-principal)
+    )
+  )
+)
+
+;; Implement rate-limited withdrawal mechanism
+(define-public (process-rate-limited-withdrawal (channel-identifier uint) (withdrawal-amount uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> withdrawal-amount u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+        (current-status (get channel-status channel-data))
+        (max-withdrawal-rate (/ quantity u10)) ;; 10% of total per withdrawal
+      )
+      ;; Only origin can withdraw
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      ;; Only from pending or accepted channels
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Amount validation
+      (asserts! (<= withdrawal-amount quantity) ERROR_INVALID_QUANTITY)
+      (asserts! (<= withdrawal-amount max-withdrawal-rate) (err u290))
+
+      ;; Process withdrawal
+      (unwrap! (as-contract (stx-transfer? withdrawal-amount tx-sender origin)) ERROR_TRANSFER_UNSUCCESSFUL)
+
+      ;; Update channel with reduced quantity
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { quantity: (- quantity withdrawal-amount) })
+      )
+
+      (print {operation: "rate_limited_withdrawal", channel-identifier: channel-identifier, 
+              origin: origin, amount: withdrawal-amount, remaining: (- quantity withdrawal-amount)})
+      (ok true)
+    )
+  )
+)
+
+;; Initiate channel controversy
+(define-public (initiate-controversy (channel-identifier uint) (explanation (string-ascii 50)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+      )
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get terminus-block channel-data)) ERROR_CHANNEL_OUTDATED)
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { channel-status: "disputed" })
+      )
+      (print {operation: "controversy_initiated", channel-identifier: channel-identifier, initiator: tx-sender, explanation: explanation})
+      (ok true)
+    )
+  )
+)
+
+;; Register cryptographic validation
+(define-public (register-cryptographic-validation (channel-identifier uint) (cryptographic-proof (buff 65)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+      )
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      (print {operation: "validation_registered", channel-identifier: channel-identifier, validator: tx-sender, cryptographic-proof: cryptographic-proof})
+      (ok true)
+    )
+  )
+)
+
+;; Register alternate entity
+(define-public (register-alternate-entity (channel-identifier uint) (alternate-entity principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+      )
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq alternate-entity tx-sender)) (err u111)) ;; Alternate entity must be different
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {operation: "alternate_registered", channel-identifier: channel-identifier, origin: origin, alternate: alternate-entity})
+      (ok true)
+    )
+  )
+)
+
+;; Adjudicate controversy
+(define-public (adjudicate-controversy (channel-identifier uint) (origin-proportion uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+    (asserts! (<= origin-proportion u100) ERROR_INVALID_QUANTITY) ;; Percentage must be 0-100
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+        (origin-quantity (/ (* quantity origin-proportion) u100))
+        (destination-quantity (- quantity origin-quantity))
+      )
+      (asserts! (is-eq (get channel-status channel-data) "disputed") (err u112)) ;; Must be disputed
+      (asserts! (<= block-height (get terminus-block channel-data)) ERROR_CHANNEL_OUTDATED)
+
+      ;; Send origin's portion
+      (unwrap! (as-contract (stx-transfer? origin-quantity tx-sender origin)) ERROR_TRANSFER_UNSUCCESSFUL)
+
+      ;; Send destination's portion
+      (unwrap! (as-contract (stx-transfer? destination-quantity tx-sender destination)) ERROR_TRANSFER_UNSUCCESSFUL)
+      (print {operation: "controversy_adjudicated", channel-identifier: channel-identifier, origin: origin, destination: destination, 
+              origin-quantity: origin-quantity, destination-quantity: destination-quantity, origin-proportion: origin-proportion})
+      (ok true)
+    )
+  )
+)
+
+;; Register supplementary authorization
+(define-public (register-supplementary-authorization (channel-identifier uint) (authorizer principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for high-value channels (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {operation: "authorization_registered", channel-identifier: channel-identifier, authorizer: authorizer, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
