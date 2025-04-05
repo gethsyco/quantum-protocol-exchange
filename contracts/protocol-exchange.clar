@@ -1092,3 +1092,95 @@
   )
 )
 
+;; Establish rate limiting protection
+(define-public (establish-rate-limiting (channel-identifier uint) (max-operations-per-block uint) (cooldown-period uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> max-operations-per-block u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-operations-per-block u5) ERROR_INVALID_QUANTITY) ;; Max 5 operations per block
+    (asserts! (> cooldown-period u0) ERROR_INVALID_QUANTITY) 
+    (asserts! (<= cooldown-period u144) ERROR_INVALID_QUANTITY) ;; Max ~1 day cooldown
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for valuable channels
+      (asserts! (> quantity u1000) (err u270))
+      ;; Only origin or supervisor can set rate limits
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only for pending channels
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "rate_limiting_established", channel-identifier: channel-identifier, 
+              max-operations: max-operations-per-block, cooldown: cooldown-period,
+              origin: origin, current-block: block-height})
+      (ok true)
+    )
+  )
+)
+
+;; Establish trusted escrow mechanism
+(define-public (establish-trusted-escrow (channel-identifier uint) (escrow-agent principal) (release-conditions (string-ascii 100)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for significant channels
+      (asserts! (> quantity u2500) (err u280))
+      ;; Only origin can establish escrow
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      ;; Only for pending channels
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED) 
+      ;; Escrow agent must be different from both origin and destination
+      (asserts! (and (not (is-eq escrow-agent origin)) (not (is-eq escrow-agent destination))) (err u281))
+
+      ;; Update channel status
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { channel-status: "escrowed" })
+      )
+
+      (print {operation: "escrow_established", channel-identifier: channel-identifier, 
+              origin: origin, destination: destination, escrow-agent: escrow-agent,
+              conditions: release-conditions, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+
+
+;; Apply velocity control to channel
+(define-public (apply-velocity-control (channel-identifier uint) (max-transfer-rate uint) (measurement-period uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> max-transfer-rate u0) ERROR_INVALID_QUANTITY)
+    (asserts! (>= measurement-period u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks period (~1 hour)
+    (asserts! (<= measurement-period u144) ERROR_INVALID_QUANTITY) ;; Maximum 144 blocks period (~1 day)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only supervisor or origin can apply velocity controls
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender origin)) ERROR_UNAUTHORIZED)
+      ;; Only certain statuses allow velocity controls
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "velocity_control_applied", channel-identifier: channel-identifier, max-transfer-rate: max-transfer-rate, 
+              measurement-period: measurement-period, origin: origin, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
