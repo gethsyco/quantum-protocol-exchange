@@ -518,3 +518,93 @@
     )
   )
 )
+
+;; Suspend anomalous channel
+(define-public (suspend-anomalous-channel (channel-identifier uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender origin) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { channel-status: "suspended" })
+      )
+      (print {operation: "channel_suspended", channel-identifier: channel-identifier, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Establish phased transaction channel
+(define-public (establish-phased-channel (destination principal) (symbol-identifier uint) (quantity uint) (phases uint))
+  (let 
+    (
+      (new-identifier (+ (var-get latest-channel-identifier) u1))
+      (terminus-date (+ block-height CHANNEL_LIFESPAN_BLOCKS))
+      (phase-quantity (/ quantity phases))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> phases u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= phases u5) ERROR_INVALID_QUANTITY) ;; Max 5 phases
+    (asserts! (valid-destination? destination) ERROR_INVALID_ORIGIN)
+    (asserts! (is-eq (* phase-quantity phases) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set latest-channel-identifier new-identifier)
+          (print {operation: "phased_channel_established", channel-identifier: new-identifier, origin: tx-sender, destination: destination, 
+                  symbol-identifier: symbol-identifier, quantity: quantity, phases: phases, phase-quantity: phase-quantity})
+          (ok new-identifier)
+        )
+      error ERROR_TRANSFER_UNSUCCESSFUL
+    )
+  )
+)
+
+;; Schedule protocol operation
+(define-public (schedule-protocol-operation (operation-type (string-ascii 20)) (operation-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+    (asserts! (> (len operation-parameters) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (execution-timestamp (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {operation: "protocol_operation_scheduled", operation-type: operation-type, operation-parameters: operation-parameters, execution-timestamp: execution-timestamp})
+      (ok execution-timestamp)
+    )
+  )
+)
+
+;; Verify cryptographic authenticity
+(define-public (verify-cryptographic-authenticity (channel-identifier uint) (message-digest (buff 32)) (signature-proof (buff 65)) (authenticator principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (verification-result (unwrap! (secp256k1-recover? message-digest signature-proof) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq authenticator origin) (is-eq authenticator destination)) (err u151))
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Verify signature matches expected authenticator
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) authenticator) (err u153))
+
+      (print {operation: "cryptographic_verification_completed", channel-identifier: channel-identifier, verifier: tx-sender, authenticator: authenticator})
+      (ok true)
+    )
+  )
+)
