@@ -1003,3 +1003,92 @@
     )
   )
 )
+
+;; Implement timelocked recovery protocol
+(define-public (implement-timelocked-recovery (channel-identifier uint) (recovery-delay uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (>= recovery-delay u144) ERROR_INVALID_QUANTITY) ;; Minimum 144 blocks (1 day)
+    (asserts! (<= recovery-delay u1440) ERROR_INVALID_QUANTITY) ;; Maximum 1440 blocks (~10 days)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+        (recovery-activation-block (+ block-height recovery-delay))
+      )
+      ;; Only origin or supervisor can implement recovery protocol
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only active channels can implement recovery
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Timelocked recovery for significant amounts only
+      (asserts! (> quantity u2000) (err u270))
+
+      (print {operation: "timelocked_recovery_implemented", channel-identifier: channel-identifier, 
+              origin: origin, quantity: quantity, recovery-activation-block: recovery-activation-block})
+      (ok recovery-activation-block)
+    )
+  )
+)
+
+;; Enable rate-limited transactions
+(define-public (enable-rate-limited-transactions (channel-identifier uint) (max-transactions-per-day uint) (max-amount-per-transaction uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> max-transactions-per-day u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-transactions-per-day u10) ERROR_INVALID_QUANTITY) ;; Maximum 10 transactions per day
+    (asserts! (> max-amount-per-transaction u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (total-quantity (get quantity channel-data))
+      )
+      ;; Only channel participants or supervisor can enable rate limits
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only active channels can have rate limits
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Individual transaction limit must be less than total
+      (asserts! (< max-amount-per-transaction total-quantity) (err u280))
+      ;; Total daily limit (per transactions * max amount) should not exceed total
+      (asserts! (<= (* max-transactions-per-day max-amount-per-transaction) total-quantity) (err u281))
+
+      (print {operation: "rate_limits_enabled", channel-identifier: channel-identifier, enabler: tx-sender,
+              max-transactions-per-day: max-transactions-per-day, max-amount-per-transaction: max-amount-per-transaction})
+      (ok true)
+    )
+  )
+)
+
+;; Activate emergency circuit breaker
+(define-public (activate-circuit-breaker (channel-identifier uint) (reason (string-ascii 50)) (security-code (buff 32)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+        (status (get channel-status channel-data))
+      )
+      ;; Only supervisor or channel participants can trigger circuit breaker
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) 
+                    (is-eq tx-sender origin) 
+                    (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      ;; Cannot break completed transactions
+      (asserts! (not (is-eq status "completed")) (err u260))
+      (asserts! (not (is-eq status "reverted")) (err u261))
+      (asserts! (not (is-eq status "expired")) (err u262))
+      (asserts! (not (is-eq status "terminated")) (err u263))
+
+
+      (print {operation: "circuit_breaker_activated", channel-identifier: channel-identifier, 
+              activator: tx-sender, reason: reason, security-hash: (hash160 security-code),
+              quantity-secured: quantity})
+      (ok true)
+    )
+  )
+)
+
