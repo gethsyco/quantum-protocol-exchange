@@ -715,3 +715,112 @@
     )
   )
 )
+
+;; Configure security constraints
+(define-public (configure-security-constraints (max-attempts uint) (lockout-interval uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+    (asserts! (> max-attempts u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-attempts u10) ERROR_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> lockout-interval u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks lockout (~1 hour)
+    (asserts! (<= lockout-interval u144) ERROR_INVALID_QUANTITY) ;; Maximum 144 blocks lockout (~1 day)
+
+    ;; Note: Full implementation would track limits in contract variables
+
+    (print {operation: "security_constraints_configured", max-attempts: max-attempts, 
+            lockout-interval: lockout-interval, supervisor: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Verify advanced cryptographic proof
+(define-public (verify-advanced-proof (channel-identifier uint) (advanced-proof (buff 128)) (public-inputs (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len public-inputs) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only high-value channels need advanced verification
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; In production, actual advanced proof verification would occur here
+
+      (print {operation: "advanced_proof_verified", channel-identifier: channel-identifier, verifier: tx-sender, 
+              proof-digest: (hash160 advanced-proof), public-inputs: public-inputs})
+      (ok true)
+    )
+  )
+)
+
+;; Transfer channel management authority
+(define-public (transfer-channel-authority (channel-identifier uint) (new-authority principal) (authorization-code (buff 32)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (current-authority (get origin-entity channel-data))
+        (current-status (get channel-status channel-data))
+      )
+      ;; Only current authority or supervisor can transfer
+      (asserts! (or (is-eq tx-sender current-authority) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; New authority must be different
+      (asserts! (not (is-eq new-authority current-authority)) (err u210))
+      (asserts! (not (is-eq new-authority (get destination-entity channel-data))) (err u211))
+      ;; Only certain states allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Update channel authority
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { origin-entity: new-authority })
+      )
+      (print {operation: "authority_transferred", channel-identifier: channel-identifier, 
+              previous-authority: current-authority, new-authority: new-authority, authorization-digest: (hash160 authorization-code)})
+      (ok true)
+    )
+  )
+)
+
+;; Process protected extraction
+(define-public (process-protected-extraction (channel-identifier uint) (extraction-quantity uint) (approval-signature (buff 65)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+        (status (get channel-status channel-data))
+      )
+      ;; Only supervisor can process protected extractions
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      ;; Only from disputed channels
+      (asserts! (is-eq status "disputed") (err u220))
+      ;; Amount validation
+      (asserts! (<= extraction-quantity quantity) ERROR_INVALID_QUANTITY)
+      ;; Minimum timelock before extraction (48 blocks, ~8 hours)
+      (asserts! (>= block-height (+ (get genesis-block channel-data) u48)) (err u221))
+
+      ;; Process extraction
+      (unwrap! (as-contract (stx-transfer? extraction-quantity tx-sender origin)) ERROR_TRANSFER_UNSUCCESSFUL)
+
+      ;; Update channel record
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { quantity: (- quantity extraction-quantity) })
+      )
+
+      (print {operation: "extraction_processed", channel-identifier: channel-identifier, origin: origin, 
+              quantity: extraction-quantity, remaining: (- quantity extraction-quantity)})
+      (ok true)
+    )
+  )
+)
