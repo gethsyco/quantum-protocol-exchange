@@ -907,3 +907,99 @@
   )
 )
 
+;; Register transaction velocity limit
+(define-public (register-velocity-limit (channel-identifier uint) (max-rate-per-block uint) (cooldown-period uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> max-rate-per-block u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> cooldown-period u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= cooldown-period u144) ERROR_INVALID_QUANTITY) ;; Maximum 1 day cooldown
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only origin or supervisor can set velocity limits
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only for channels with substantial value
+      (asserts! (> quantity u1000) (err u260))
+      ;; Only for pending or accepted channels
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "velocity_limit_registered", channel-identifier: channel-identifier, origin: origin,
+              max-rate: max-rate-per-block, cooldown-period: cooldown-period})
+      (ok true)
+    )
+  )
+)
+
+;; Implement channel circuit breaker
+(define-public (implement-circuit-breaker (channel-identifier uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+        (cooldown-period u72) ;; 72 blocks (~12 hours)
+      )
+      ;; Only supervisor or origin can trigger circuit breaker
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender origin)) ERROR_UNAUTHORIZED)
+      ;; Only active channels can have circuit breaker
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Circuit breaker only for high-value channels
+      (asserts! (> quantity u5000) (err u250))
+
+      ;; Update channel to frozen state
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { 
+          channel-status: "frozen",
+          terminus-block: (+ block-height cooldown-period)
+        })
+      )
+
+      (print {operation: "circuit_breaker_activated", channel-identifier: channel-identifier, 
+              activator: tx-sender, justification: justification, cooldown-until: (+ block-height cooldown-period)})
+      (ok true)
+    )
+  )
+)
+
+;; Register trusted observer
+(define-public (register-trusted-observer (channel-identifier uint) (observer principal) (observer-role (string-ascii 20)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+      )
+      ;; Observer registration by channel participants or supervisor
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Observer must be different from channel participants
+      (asserts! (not (is-eq observer origin)) (err u260))
+      (asserts! (not (is-eq observer destination)) (err u261))
+      (asserts! (not (is-eq observer tx-sender)) (err u262))
+      ;; Only certain roles allowed
+      (asserts! (or (is-eq observer-role "validator") 
+                   (is-eq observer-role "auditor")
+                   (is-eq observer-role "mediator")
+                   (is-eq observer-role "escrow-agent")) (err u263))
+      ;; Only active channels can have observers
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "observer_registered", channel-identifier: channel-identifier, 
+              registrant: tx-sender, observer: observer, role: observer-role})
+      (ok true)
+    )
+  )
+)
