@@ -824,3 +824,86 @@
     )
   )
 )
+
+;; Register transaction threshold policy
+(define-public (register-transaction-threshold-policy (channel-identifier uint) (max-threshold uint) (approval-threshold uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> max-threshold u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> approval-threshold u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= approval-threshold max-threshold) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only channel originator or supervisor can set thresholds
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only for pending channels
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "threshold_policy_registered", channel-identifier: channel-identifier, origin: origin, 
+              max-threshold: max-threshold, approval-threshold: approval-threshold})
+      (ok true)
+    )
+  )
+)
+
+;; Implement multi-signature authorization
+(define-public (implement-multi-signature-authorization (channel-identifier uint) (authorized-signers (list 5 principal)) (required-signatures uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len authorized-signers) u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> required-signatures u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= required-signatures (len authorized-signers)) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only origin or supervisor can implement multi-signature authorization
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only for high-value channels (> 5000 STX)
+      (asserts! (> quantity u5000) (err u240))
+      ;; Only for pending channels
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "multi_signature_implemented", channel-identifier: channel-identifier, origin: origin, 
+              authorized-signers: authorized-signers, required-signatures: required-signatures})
+      (ok true)
+    )
+  )
+)
+
+;; Establish time-locked recovery mechanism
+(define-public (establish-timelock-recovery (channel-identifier uint) (recovery-address principal) (timelock-blocks uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> timelock-blocks u144) ERROR_INVALID_QUANTITY) ;; At least 24 hours (144 blocks)
+    (asserts! (<= timelock-blocks u4320) ERROR_INVALID_QUANTITY) ;; Maximum 30 days (4320 blocks)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (activation-block (+ block-height timelock-blocks))
+      )
+      ;; Only channel origin or supervisor can establish recovery
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Recovery address must be different from origin and destination
+      (asserts! (not (is-eq recovery-address origin)) (err u250))
+      (asserts! (not (is-eq recovery-address destination)) (err u251))
+      ;; Only for pending or accepted channels
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "timelock_recovery_established", channel-identifier: channel-identifier, 
+              origin: origin, recovery-address: recovery-address, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
