@@ -1344,3 +1344,84 @@
     )
   )
 )
+
+;; Establish transaction rate limit
+(define-public (establish-transaction-rate-limit (channel-identifier uint) (max-transactions-per-interval uint) (interval-blocks uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> max-transactions-per-interval u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-transactions-per-interval u10) ERROR_INVALID_QUANTITY) ;; Maximum 10 transactions per interval
+    (asserts! (>= interval-blocks u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= interval-blocks u144) ERROR_INVALID_QUANTITY) ;; Maximum 144 blocks (~1 day)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+      )
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "rate_limit_established", channel-identifier: channel-identifier, 
+              origin: origin, max-transactions: max-transactions-per-interval, interval-blocks: interval-blocks})
+      (ok true)
+    )
+  )
+)
+
+;; Implement emergency channel lockdown
+(define-public (implement-emergency-lockdown (channel-identifier uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (lockdown-period u72) ;; 72 blocks (~12 hours)
+      )
+      ;; Only authorized entities can implement lockdown
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender origin)) ERROR_UNAUTHORIZED)
+      ;; Only active channels can be locked down
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                    (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "emergency_lockdown", channel-identifier: channel-identifier, 
+              initiator: tx-sender, lockdown-period: lockdown-period, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Implement transaction value verification
+(define-public (verify-transaction-value (channel-identifier uint) (expected-value uint) (tolerance-percentage uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> expected-value u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= tolerance-percentage u20) ERROR_INVALID_QUANTITY) ;; Maximum 20% tolerance
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (actual-value (get quantity channel-data))
+        (lower-bound (/ (* expected-value (- u100 tolerance-percentage)) u100))
+        (upper-bound (/ (* expected-value (+ u100 tolerance-percentage)) u100))
+      )
+      ;; Only authorized parties can verify transaction value
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only verify active channels
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                    (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      ;; Verify value is within tolerance
+      (asserts! (and (>= actual-value lower-bound) (<= actual-value upper-bound)) (err u240))
+
+      (print {operation: "value_verification", channel-identifier: channel-identifier, 
+              verifier: tx-sender, expected-value: expected-value, actual-value: actual-value, tolerance: tolerance-percentage})
+      (ok true)
+    )
+  )
+)
+
