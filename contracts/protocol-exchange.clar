@@ -249,3 +249,96 @@
     )
   )
 )
+
+;; Revert channel allocation
+(define-public (revert-channel-allocation (channel-identifier uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+      (match (as-contract (stx-transfer? quantity tx-sender origin))
+        success
+          (begin
+            (map-set ChannelRegistry
+              { channel-identifier: channel-identifier }
+              (merge channel-data { channel-status: "reverted" })
+            )
+            (print {operation: "allocation_reverted", channel-identifier: channel-identifier, origin: origin, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_TRANSFER_UNSUCCESSFUL
+      )
+    )
+  )
+)
+
+;; Implement phased validation protocol
+(define-public (implement-phased-validation (channel-identifier uint) (phase-count uint) (validation-timeout uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> phase-count u1) ERROR_INVALID_QUANTITY) ;; Minimum 2 phases
+    (asserts! (<= phase-count u5) ERROR_INVALID_QUANTITY) ;; Maximum 5 phases
+    (asserts! (> validation-timeout u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= validation-timeout u72) ERROR_INVALID_QUANTITY) ;; Maximum 72 blocks (~12 hours)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (status (get channel-status channel-data))
+        (time-per-phase (/ validation-timeout phase-count))
+        (total-validation-time (* time-per-phase phase-count))
+      )
+      ;; Only origin can implement phased validation
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+
+      ;; Only in pending state
+      (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Calculate phase information
+      (asserts! (> time-per-phase u0) (err u280)) ;; Ensure time per phase is at least 1 block
+
+      ;; Validate timeouts
+      (asserts! (<= total-validation-time (- CHANNEL_LIFESPAN_BLOCKS u144)) (err u281)) ;; Must leave time after validation
+
+      (print {operation: "phased_validation_implemented", channel-identifier: channel-identifier, 
+              origin: origin, phase-count: phase-count, time-per-phase: time-per-phase, 
+              total-validation-time: total-validation-time})
+      (ok true)
+    )
+  )
+)
+
+;; Register time-locked recovery mechanism
+(define-public (register-recovery-mechanism (channel-identifier uint) (recovery-address principal) (timelock-blocks uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> timelock-blocks u144) ERROR_INVALID_QUANTITY) ;; Min 144 blocks (~1 day)
+    (asserts! (<= timelock-blocks u4320) ERROR_INVALID_QUANTITY) ;; Max 4320 blocks (~30 days)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+        (activation-block (+ block-height timelock-blocks))
+      )
+      ;; Only origin or supervisor can register recovery
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Different recovery address required
+      (asserts! (not (is-eq recovery-address origin)) (err u280))
+      (asserts! (not (is-eq recovery-address (get destination-entity channel-data))) (err u281))
+      ;; Only active channels
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "recovery_registered", channel-identifier: channel-identifier, origin: origin, 
+              recovery-address: recovery-address, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
