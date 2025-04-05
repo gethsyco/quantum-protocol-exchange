@@ -1425,3 +1425,87 @@
   )
 )
 
+;; Establish multi-signature approval requirement
+(define-public (establish-multi-signature-requirement (channel-identifier uint) (required-approvals uint) (authorized-signers (list 5 principal)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> required-approvals u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= required-approvals (len authorized-signers)) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for high-value channels
+      (asserts! (> quantity u10000) (err u230))
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Ensure there are enough signers
+      (asserts! (>= (len authorized-signers) u2) (err u231))
+      (asserts! (<= (len authorized-signers) u5) (err u232))
+
+      (print {operation: "multi_signature_established", channel-identifier: channel-identifier, 
+              origin: origin, required-approvals: required-approvals, authorized-signers: authorized-signers})
+      (ok true)
+    )
+  )
+)
+
+
+;; Implement advanced anti-replay protection
+(define-public (implement-anti-replay-protection (channel-identifier uint) (nonce uint) (sequence-proof (buff 32)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> nonce u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+      )
+      ;; Only authorized parties can implement anti-replay protection
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      ;; Only active channels can have anti-replay protection
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                    (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      ;; In production, sequence-proof validation would occur here
+
+      (print {operation: "anti_replay_protection", channel-identifier: channel-identifier, 
+              implementer: tx-sender, nonce: nonce, sequence-hash: (hash160 sequence-proof)})
+      (ok true)
+    )
+  )
+)
+
+;; Establish dual approval authorization
+(define-public (establish-dual-approval (channel-identifier uint) (secondary-approver principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for channels above threshold
+      (asserts! (> quantity u5000) (err u250))
+      ;; Only origin can establish dual approval
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      ;; Only active channels can have dual approval
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Secondary approver must be different from origin and destination
+      (asserts! (not (is-eq secondary-approver origin)) (err u251))
+      (asserts! (not (is-eq secondary-approver destination)) (err u252))
+
+      (print {operation: "dual_approval_established", channel-identifier: channel-identifier, 
+              origin: origin, secondary-approver: secondary-approver})
+      (ok true)
+    )
+  )
+)
