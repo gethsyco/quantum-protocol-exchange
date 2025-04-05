@@ -157,3 +157,95 @@
     )
   )
 )
+
+;; Activate advanced transaction monitoring
+(define-public (activate-advanced-monitoring (channel-identifier uint) (monitoring-threshold uint) (notification-principal principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> monitoring-threshold u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= monitoring-threshold u100) ERROR_INVALID_QUANTITY) ;; Threshold must be percentage 0-100
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+        (status (get channel-status channel-data))
+      )
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq notification-principal tx-sender)) (err u240)) ;; Notification entity must differ from sender
+
+      ;; Only for channels above threshold
+      (asserts! (> quantity u1000) (err u241))
+
+      (print {operation: "monitoring_activated", channel-identifier: channel-identifier, origin: origin, 
+              monitoring-threshold: monitoring-threshold, notification-principal: notification-principal})
+      (ok true)
+    )
+  )
+)
+
+;; Implement multi-signature authorization
+(define-public (implement-multisig-authorization (channel-identifier uint) (signers (list 3 principal)) (threshold uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> threshold u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= threshold (len signers)) ERROR_INVALID_QUANTITY) ;; Threshold must be <= number of signers
+    (asserts! (<= threshold u3) ERROR_INVALID_QUANTITY) ;; Maximum threshold is 3
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+        (status (get channel-status channel-data))
+      )
+      ;; Only origin or supervisor can implement multisig
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+
+      ;; Only for high-value channels
+      (asserts! (> quantity u5000) (err u260))
+
+      ;; Only in pending state
+      (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Ensure origin is among signers
+      (asserts! (is-some (index-of signers origin)) (err u261))
+
+      (print {operation: "multisig_implemented", channel-identifier: channel-identifier, 
+              origin: origin, signers: signers, threshold: threshold})
+      (ok true)
+    )
+  )
+)
+
+;; Register transaction anomaly detection
+(define-public (register-anomaly-detection (channel-identifier uint) (velocity-limit uint) (volume-limit uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> velocity-limit u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> volume-limit u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (status (get channel-status channel-data))
+      )
+      ;; Only authorized parties can register anomaly detection
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+
+      ;; Only in appropriate states
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Volume limit must be reasonable
+      (asserts! (<= volume-limit (get quantity channel-data)) (err u270))
+
+      ;; Rate limit must be reasonable (max 50% of channel lifespan)
+      (asserts! (<= velocity-limit (/ CHANNEL_LIFESPAN_BLOCKS u2)) (err u271))
+
+      (print {operation: "anomaly_detection_registered", channel-identifier: channel-identifier, 
+              requestor: tx-sender, velocity-limit: velocity-limit, volume-limit: volume-limit})
+      (ok true)
+    )
+  )
+)
