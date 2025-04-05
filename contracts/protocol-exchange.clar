@@ -1277,3 +1277,70 @@
     )
   )
 )
+
+;; Quarantine suspicious transaction
+(define-public (quarantine-suspicious-transaction (channel-identifier uint) (suspicious-behavior (string-ascii 50)) (risk-level uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (and (>= risk-level u1) (<= risk-level u5)) ERROR_INVALID_QUANTITY) ;; Risk level 1-5
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (status (get channel-status channel-data))
+        (quarantine-period (+ u72 (* risk-level u24))) ;; Base 72 blocks + 24 per risk level
+      )
+      ;; Only supervisor or participants can quarantine
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) 
+                    (is-eq tx-sender origin) 
+                    (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      ;; Cannot quarantine completed transactions
+      (asserts! (not (is-eq status "completed")) (err u290))
+      (asserts! (not (is-eq status "reverted")) (err u291))
+      (asserts! (not (is-eq status "expired")) (err u292))
+
+      (print {operation: "transaction_quarantined", channel-identifier: channel-identifier, 
+              reporter: tx-sender, suspicious-behavior: suspicious-behavior, 
+              risk-level: risk-level, quarantine-period: quarantine-period,
+              review-block: (+ block-height quarantine-period)})
+      (ok true)
+    )
+  )
+)
+
+;; Implement progressive security escalation
+(define-public (implement-progressive-security (channel-identifier uint) (security-level uint) (security-parameters (list 3 uint)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (>= security-level u1) ERROR_INVALID_QUANTITY)
+    (asserts! (<= security-level u3) ERROR_INVALID_QUANTITY) ;; Security levels 1-3 only
+    (asserts! (>= (len security-parameters) security-level) ERROR_INVALID_QUANTITY) ;; Need parameters for each level
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only supervisor or origin can implement progressive security
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender origin)) ERROR_UNAUTHORIZED)
+      ;; Security level requirements based on channel quantity
+      (if (> security-level u1)
+          (asserts! (> quantity u1000) (err u280)) ;; Level 2+ requires >1000 STX
+          true
+      )
+      (if (> security-level u2)
+          (asserts! (> quantity u10000) (err u281)) ;; Level 3 requires >10000 STX
+          true
+      )
+      ;; Only channels in certain states can implement progressive security
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                    (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "progressive_security_implemented", channel-identifier: channel-identifier, security-level: security-level, 
+              security-parameters: security-parameters, requester: tx-sender})
+      (ok security-level)
+    )
+  )
+)
