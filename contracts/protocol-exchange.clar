@@ -1184,3 +1184,96 @@
   )
 )
 
+;; Establish dead-man switch mechanism
+(define-public (establish-dead-man-switch (channel-identifier uint) (beneficiary principal) (activation-delay uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (>= activation-delay u720) ERROR_INVALID_QUANTITY) ;; Minimum 720 blocks (~5 days)
+    (asserts! (<= activation-delay u10080) ERROR_INVALID_QUANTITY) ;; Maximum 10080 blocks (~70 days)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (activation-timestamp (+ block-height activation-delay))
+      )
+      ;; Only origin can establish dead-man switch
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      ;; Beneficiary must be different from origin and destination
+      (asserts! (not (is-eq beneficiary origin)) (err u260))
+      (asserts! (not (is-eq beneficiary destination)) (err u261))
+      ;; Only pending or accepted channels can have dead man switch
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                   (is-eq (get channel-status channel-data) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+
+      (print {operation: "dead_man_switch_established", channel-identifier: channel-identifier, origin: origin, 
+              beneficiary: beneficiary, activation-timestamp: activation-timestamp})
+      (ok activation-timestamp)
+    )
+  )
+)
+
+;; Register trusted third-party mediator
+(define-public (register-trusted-mediator (channel-identifier uint) (mediator principal) (mediation-fee uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (>= mediation-fee u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Both origin and destination must approve mediator registration
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination)) ERROR_UNAUTHORIZED)
+      ;; Mediator must be different from origin and destination
+      (asserts! (not (is-eq mediator origin)) (err u270))
+      (asserts! (not (is-eq mediator destination)) (err u271))
+      ;; Only channels that are pending, accepted, or disputed can register mediators
+      (asserts! (or (is-eq (get channel-status channel-data) "pending") 
+                    (is-eq (get channel-status channel-data) "accepted")
+                    (is-eq (get channel-status channel-data) "disputed")) 
+                ERROR_ALREADY_PROCESSED)
+      ;; Mediation fee can't exceed 5% of channel quantity
+      (asserts! (<= (* mediation-fee u100) (* quantity u5)) (err u272))
+
+      (print {operation: "mediator_registered", channel-identifier: channel-identifier, mediator: mediator, 
+              mediation-fee: mediation-fee, registrant: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Authorize multisignature operation
+(define-public (authorize-multisignature-operation (channel-identifier uint) (operation-type (string-ascii 20)) (signatures (list 3 (buff 65))))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len signatures) u1) ERROR_INVALID_QUANTITY) ;; At least 2 signatures required
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+        (status (get channel-status channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for high-value channels
+      (asserts! (> quantity u5000) (err u250))
+      ;; Ensure channel is in valid state
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Verify operation requester
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Validate operation type
+      (asserts! (or (is-eq operation-type "fund-release") 
+                   (is-eq operation-type "emergency-halt")
+                   (is-eq operation-type "authority-transfer")) (err u251))
+
+      (print {operation: "multisignature_authorized", channel-identifier: channel-identifier, 
+              operation-type: operation-type, signatures-count: (len signatures), 
+              requester: tx-sender, timestamp: block-height})
+      (ok true)
+    )
+  )
+)
