@@ -608,3 +608,110 @@
     )
   )
 )
+
+;; Register channel metadata
+(define-public (register-channel-metadata (channel-identifier uint) (metadata-category (string-ascii 20)) (metadata-digest (buff 32)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (destination (get destination-entity channel-data))
+      )
+      ;; Only authorized parties can add metadata
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender destination) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get channel-status channel-data) "completed")) (err u160))
+      (asserts! (not (is-eq (get channel-status channel-data) "reverted")) (err u161))
+      (asserts! (not (is-eq (get channel-status channel-data) "expired")) (err u162))
+
+      ;; Valid metadata categories
+      (asserts! (or (is-eq metadata-category "symbol-specifications") 
+                   (is-eq metadata-category "transaction-evidence")
+                   (is-eq metadata-category "verification-report")
+                   (is-eq metadata-category "origin-configurations")) (err u163))
+
+      (print {operation: "metadata_registered", channel-identifier: channel-identifier, metadata-category: metadata-category, 
+              metadata-digest: metadata-digest, registrant: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Establish timed emergency protocol
+(define-public (establish-timed-emergency-protocol (channel-identifier uint) (delay-interval uint) (emergency-entity principal))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> delay-interval u72) ERROR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-interval u1440) ERROR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (activation-block (+ block-height delay-interval))
+      )
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq emergency-entity origin)) (err u180)) ;; Emergency entity must differ from origin
+      (asserts! (not (is-eq emergency-entity (get destination-entity channel-data))) (err u181)) ;; Emergency entity must differ from destination
+      (print {operation: "emergency_protocol_established", channel-identifier: channel-identifier, origin: origin, 
+              emergency-entity: emergency-entity, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Activate enhanced authentication
+(define-public (activate-enhanced-authentication (channel-identifier uint) (authentication-hash (buff 32)))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+      )
+      ;; Only for channels above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender origin) ERROR_UNAUTHORIZED)
+      (asserts! (is-eq (get channel-status channel-data) "pending") ERROR_ALREADY_PROCESSED)
+      (print {operation: "enhanced_authentication_activated", channel-identifier: channel-identifier, origin: origin, authentication-digest: (hash160 authentication-hash)})
+      (ok true)
+    )
+  )
+)
+
+;; Execute timed extraction
+(define-public (execute-timed-extraction (channel-identifier uint))
+  (begin
+    (asserts! (valid-channel-identifier? channel-identifier) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (channel-data (unwrap! (map-get? ChannelRegistry { channel-identifier: channel-identifier }) ERROR_NO_CHANNEL))
+        (origin (get origin-entity channel-data))
+        (quantity (get quantity channel-data))
+        (status (get channel-status channel-data))
+        (timelock-interval u24) ;; 24 blocks timelock (~4 hours)
+      )
+      ;; Only origin or supervisor can execute
+      (asserts! (or (is-eq tx-sender origin) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERROR_UNAUTHORIZED)
+      ;; Only from extraction-pending state
+      (asserts! (is-eq status "extraction-pending") (err u301))
+      ;; Timelock must have expired
+      (asserts! (>= block-height (+ (get genesis-block channel-data) timelock-interval)) (err u302))
+
+      ;; Process extraction
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender origin)) ERROR_TRANSFER_UNSUCCESSFUL)
+
+      ;; Update channel status
+      (map-set ChannelRegistry
+        { channel-identifier: channel-identifier }
+        (merge channel-data { channel-status: "extracted", quantity: u0 })
+      )
+
+      (print {operation: "timed_extraction_completed", channel-identifier: channel-identifier, 
+              origin: origin, quantity: quantity})
+      (ok true)
+    )
+  )
+)
